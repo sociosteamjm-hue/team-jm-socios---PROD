@@ -13,23 +13,54 @@ const statusFor = (member, year) => {
 };
 function loadLocalMembers() { try { return JSON.parse(localStorage.getItem(STORAGE_KEY)) || []; } catch { return []; } }
 async function loadMembers() {
-  if (cloudDatabase) {
-    const { data, error } = await cloudDatabase.from('members').select('*').order('number');
-    if (error) throw error;
-    return data.map((member) => ({ id: member.id, number: member.number, name: member.name, contact: member.contact || '', nif: member.nif || '', locality: member.locality || '', address: member.address || '', postal: member.postal || '', email: member.email || '', paymentMode: member.payment_mode || '', date: member.registration_date || '', notes: member.notes || '', removed: member.removed || false, dues: member.dues || {} }));
+  if (!cloudDatabase) return loadLocalMembers();
+  if (!authenticated) return [];
+  const { data, error } = await cloudDatabase.from('members').select('*').order('number');
+  if (error) throw error;
+  return data.map((member) => ({ id: member.id, number: member.number, name: member.name, contact: member.contact || '', nif: member.nif || '', locality: member.locality || '', address: member.address || '', postal: member.postal || '', email: member.email || '', paymentMode: member.payment_mode || '', date: member.registration_date || '', notes: member.notes || '', removed: member.removed || false, dues: member.dues || {} }));
+}
+async function refreshMembers() {
+  try {
+    members = await loadMembers();
+    render();
+  } catch (error) {
+    showLogin(`Erro de ligação: ${error.message}`);
   }
-  return loadLocalMembers();
 }
 function showLogin(message = '') { $('#login-screen').hidden = false; $('.app-shell').style.display = 'none'; $('#login-error').textContent = message; }
 function showApplication() { authenticated = true; $('#login-screen').hidden = true; $('.app-shell').style.display = ''; }
 async function initializeAuthentication() {
-  if (!cloudDatabase) return showApplication();
+  if (!cloudDatabase) {
+    authenticated = true;
+    showApplication();
+    await refreshMembers();
+    return;
+  }
+
   const { data } = await cloudDatabase.auth.getSession();
-  if (data.session) showApplication(); else showLogin();
-  cloudDatabase.auth.onAuthStateChange((_event, session) => { if (session) showApplication(); else showLogin(); });
+  authenticated = Boolean(data.session);
+  if (authenticated) {
+    showApplication();
+    await refreshMembers();
+    return;
+  }
+
+  showLogin();
+  cloudDatabase.auth.onAuthStateChange(async (_event, session) => {
+    authenticated = Boolean(session);
+    if (session) {
+      showApplication();
+      await refreshMembers();
+    } else {
+      showLogin();
+      members = [];
+      render();
+    }
+  });
 }
 async function saveMembers() {
   if (cloudDatabase) {
+    if (!authenticated) throw new Error('É necessário iniciar sessão para guardar os dados.');
     const rows = members.map((member) => ({ id: member.id, number: member.number, name: member.name, contact: member.contact, nif: member.nif, locality: member.locality, address: member.address, postal: member.postal, email: member.email, payment_mode: member.paymentMode, registration_date: member.date || null, notes: member.notes, removed: member.removed || false, dues: member.dues || {}, updated_at: new Date().toISOString() }));
     const { error } = await cloudDatabase.from('members').upsert(rows, { onConflict: 'id' });
     if (error) throw error;
@@ -37,7 +68,18 @@ async function saveMembers() {
   }
   localStorage.setItem(STORAGE_KEY, JSON.stringify(members));
 }
-function nextNumber() { return members.length ? Math.max(...members.map((member) => member.number)) + 1 : 1; }
+function nextNumber() { return members.length ? Math.max(...members.map((member) => Number(member.number) || 0)) + 1 : 1; }
+async function resolveNextAvailableNumber() {
+  if (!cloudDatabase) return nextNumber();
+  try {
+    const { data, error } = await cloudDatabase.from('members').select('number');
+    if (error) throw error;
+    const usedNumbers = (data || []).map((item) => Number(item.number)).filter((value) => Number.isFinite(value));
+    return usedNumbers.length ? Math.max(...usedNumbers) + 1 : 1;
+  } catch (_error) {
+    return nextNumber();
+  }
+}
 function formatDate(value) { if (!value) return ''; return new Intl.DateTimeFormat('pt-PT').format(new Date(`${value}T00:00:00`)); }
 function showToast(message) { const toast = $('#toast'); toast.textContent = message; toast.classList.add('show'); setTimeout(() => toast.classList.remove('show'), 2400); }
 function statusBadge(status) { const cls = status === 'Em dia' ? 'status-paid' : status === 'Em falta' ? 'status-unpaid' : status === 'Removido' ? 'status-removed' : 'status-empty'; return `<span class="status ${cls}">${status}</span>`; }
@@ -95,9 +137,29 @@ $('#import-button').addEventListener('click', () => $('#import-file').click()); 
 $('#receipt-member').addEventListener('change', fillReceipt); $('#receipt-name').addEventListener('input', updateReceiptName); $('#receipt-description').addEventListener('input', updateReceiptPreview); $('#receipt-amount').addEventListener('input', updateReceiptPreview); $('#receipt-type').addEventListener('change', updateReceiptPreview); $('#receipt-payment').addEventListener('change', updateReceiptPreview); $('#receipt-date').addEventListener('change', updateReceiptPreview); $('#receipt-date').value = new Date().toISOString().slice(0, 10); updateReceiptPreview(); $('#print-receipt').addEventListener('click', () => window.print());
 $('#new-member-button').addEventListener('click', () => openModal()); $('#empty-new-button').addEventListener('click', () => openModal()); $('#export-button').addEventListener('click', exportData);
 $('#close-modal').addEventListener('click', closeModal); $('#cancel-modal').addEventListener('click', closeModal); $('#member-modal').addEventListener('click', (event) => { if (event.target.id === 'member-modal') closeModal(); });
-$('#member-form').addEventListener('submit', async (event) => { event.preventDefault(); const member = collectForm(); const index = members.findIndex((item) => item.id === member.id); const previous = [...members]; if (index >= 0) members[index] = member; else members.push(member); try { await saveMembers(); closeModal(); render(); showToast(index >= 0 ? 'Sócio atualizado no Excel' : 'Sócio adicionado ao Excel'); } catch (error) { members = previous; showToast(error.message); } });
+$('#member-form').addEventListener('submit', async (event) => { event.preventDefault(); const member = collectForm(); const index = members.findIndex((item) => item.id === member.id); const previous = [...members]; if (index >= 0) members[index] = member; else {
+    members.push(member);
+    if (!member.id || !members.some((item) => item.id === member.id && item.number === member.number)) {
+      const nextNumberValue = await resolveNextAvailableNumber();
+      member.number = nextNumberValue;
+      members[members.length - 1] = member;
+    }
+  }
+  try { await saveMembers(); closeModal(); render(); showToast(index >= 0 ? 'Sócio atualizado no Excel' : 'Sócio adicionado ao Excel'); } catch (error) { members = previous; showToast(error.message); } });
 $('#remove-member-button').addEventListener('click', async () => { const member = members.find((item) => item.id === $('#member-id').value); if (!member || !window.confirm(`Remover ${member.name}?`)) return; const previous = [...members]; member.removed = true; try { await saveMembers(); closeModal(); render(); showToast('Sócio removido do registo ativo'); } catch (error) { members = previous; showToast(error.message); } });
 $('#members-table').addEventListener('click', (event) => { const button = event.target.closest('[data-edit]'); if (button) openModal(members.find((member) => member.id === button.dataset.edit)); });
-$('#login-form').addEventListener('submit', async (event) => { event.preventDefault(); $('#login-error').textContent = 'A entrar...'; const { error } = await cloudDatabase.auth.signInWithPassword({ email: $('#login-email').value.trim(), password: $('#login-password').value }); if (error) $('#login-error').textContent = `Não foi possível entrar: ${error.message}`; });
+$('#login-form').addEventListener('submit', async (event) => {
+  event.preventDefault();
+  $('#login-error').textContent = 'A entrar...';
+  const { data, error } = await cloudDatabase.auth.signInWithPassword({ email: $('#login-email').value.trim(), password: $('#login-password').value });
+  if (error) {
+    $('#login-error').textContent = `Não foi possível entrar: ${error.message}`;
+    return;
+  }
+
+  authenticated = Boolean(data.session);
+  showApplication();
+  await refreshMembers();
+});
 render();
-initializeAuthentication().then(() => loadMembers()).then((loadedMembers) => { members = loadedMembers; render(); }).catch((error) => showLogin(`Erro de ligação: ${error.message}`));
+initializeAuthentication().catch((error) => showLogin(`Erro de ligação: ${error.message}`));
