@@ -29,6 +29,26 @@ async function refreshMembers() {
 }
 function showLogin(message = '') { $('#login-screen').hidden = false; $('.app-shell').style.display = 'none'; $('#login-error').textContent = message; }
 function showApplication() { authenticated = true; $('#login-screen').hidden = true; $('.app-shell').style.display = ''; }
+async function logout() {
+  if (!cloudDatabase) {
+    authenticated = false;
+    members = [];
+    render();
+    showLogin('Sessão terminada.');
+    return;
+  }
+
+  const { error } = await cloudDatabase.auth.signOut();
+  if (error) {
+    showToast(`Erro ao sair: ${error.message}`);
+    return;
+  }
+
+  authenticated = false;
+  members = [];
+  render();
+  showLogin('Sessão terminada.');
+}
 async function initializeAuthentication() {
   if (!cloudDatabase) {
     authenticated = true;
@@ -135,7 +155,7 @@ $('#dashboard-year').addEventListener('change', (event) => { selectedYear = Numb
 $('#search-input').addEventListener('input', renderMembers); $('#status-filter').addEventListener('change', renderMembers);
 $('#import-button').addEventListener('click', () => $('#import-file').click()); $('#import-file').addEventListener('change', (event) => { if (event.target.files[0]) importData(event.target.files[0]); event.target.value = ''; });
 $('#receipt-member').addEventListener('change', fillReceipt); $('#receipt-name').addEventListener('input', updateReceiptName); $('#receipt-description').addEventListener('input', updateReceiptPreview); $('#receipt-amount').addEventListener('input', updateReceiptPreview); $('#receipt-type').addEventListener('change', updateReceiptPreview); $('#receipt-payment').addEventListener('change', updateReceiptPreview); $('#receipt-date').addEventListener('change', updateReceiptPreview); $('#receipt-date').value = new Date().toISOString().slice(0, 10); updateReceiptPreview(); $('#print-receipt').addEventListener('click', () => window.print());
-$('#new-member-button').addEventListener('click', () => openModal()); $('#empty-new-button').addEventListener('click', () => openModal()); $('#export-button').addEventListener('click', exportData);
+$('#new-member-button').addEventListener('click', () => openModal()); $('#empty-new-button').addEventListener('click', () => openModal()); $('#export-button').addEventListener('click', exportData); $('#logout-button').addEventListener('click', logout);
 $('#close-modal').addEventListener('click', closeModal); $('#cancel-modal').addEventListener('click', closeModal); $('#member-modal').addEventListener('click', (event) => { if (event.target.id === 'member-modal') closeModal(); });
 $('#member-form').addEventListener('submit', async (event) => { event.preventDefault(); const member = collectForm(); const index = members.findIndex((item) => item.id === member.id); const previous = [...members]; if (index >= 0) members[index] = member; else {
     members.push(member);
